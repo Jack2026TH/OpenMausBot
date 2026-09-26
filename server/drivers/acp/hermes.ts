@@ -4,14 +4,13 @@
 // without an OpenRouter key — that is the "HTTP 401: Missing Authentication
 // header" failure. Inject writes providers.<host> and session/set_model
 // `custom:<host>:<model>` instead.
-import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import type { ModelCatalog } from "../../contracts.ts";
-import { resolveCli } from "../../procs.ts";
+import { resolveCli, spawnCli } from "../../procs.ts";
 import { decodeInjectId, hostApiKey, INJECT_SEP, localHost, mergeLocalInject } from "../local-inject.ts";
 import { createAcpDriver, type AcpSupport } from "./core.ts";
 
@@ -283,10 +282,10 @@ export async function fetchHermesAcpModels(
   env: Record<string, string | undefined>,
 ): Promise<{ id: string; label: string; custom: true }[]> {
   return await new Promise((resolve) => {
-    let child: ReturnType<typeof spawn>;
+    let child: ReturnType<typeof spawnCli>;
     try {
-      const resolved = resolveCli(cli, ["acp"], env);
-      child = spawn(resolved.command, resolved.args, { stdio: ["pipe", "pipe", "ignore"], env: env as NodeJS.ProcessEnv, windowsHide: true });
+      const resolved = resolveCli(cli, ["acp"], env as NodeJS.ProcessEnv);
+      child = spawnCli(resolved.command, resolved.args, { stdio: ["pipe", "pipe", "pipe"], env: env as NodeJS.ProcessEnv });
     } catch {
       return resolve([]);
     }
@@ -385,11 +384,16 @@ async function resolveModels(
 ): Promise<ModelCatalog> {
   const catalog = await mergeLocalInject(EMPTY, env);
   const configured = hermesConfiguredModel(env);
-  // Only probe when a hosted provider is configured; a local-only install has
-  // nothing to gain from the spawn.
-  const remote = configured ? await fetchHermesAcpModels(config?.cli || "hermes", env) : [];
+  // A wrapper CLI can own Hermes configuration outside OpenMausBot's env.
+  // Probe ACP itself and use Hermes' live model list when available.
+  const remote = await fetchHermesAcpModels(config?.cli || "hermes", env);
+  const configDefault =
+    configured ??
+    (remote.length
+      ? { id: HERMES_CONFIG_MODEL_ID, label: "Hermes default (config)", custom: true as const }
+      : null);
   const seen = new Set<string>();
-  const options = [...(configured ? [configured] : []), ...remote, ...catalog.options].filter((o) => {
+  const options = [...(configDefault ? [configDefault] : []), ...remote, ...catalog.options].filter((o) => {
     if (seen.has(o.id)) return false;
     seen.add(o.id);
     return true;
@@ -412,6 +416,7 @@ async function applySetting(
 
 const support: AcpSupport = {
   driverKind: "hermesAgent",
+  emptyLoadResponseMeansMissingSession: true,
   displayName: "Hermes",
   access: "custom",
   models: EMPTY,

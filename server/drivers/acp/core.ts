@@ -190,6 +190,8 @@ interface AcpSession {
 /** Per-harness specifics — everything that differs between Grok, Gemini, … */
 export interface AcpSupport {
   driverKind: string;
+  /** Some agents acknowledge a missing session/load cursor with {}. */
+  emptyLoadResponseMeansMissingSession?: boolean;
   displayName: string;
   /** Omit for subscription CLIs (the default). Custom-only CLIs sit below
    *  the picker-rail divider and have no first-party cloud catalog. */
@@ -1453,7 +1455,11 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
                     { sessionId: cursor, cwd, mcpServers: sessionServers },
                     LOAD_SESSION_TIMEOUT,
                     (result) => {
-                      if (result) {
+                      // Hermes ACP 0.21.x may return an empty success object
+                      // for a missing cursor; never resume that stale session.
+                      if (result && !(support.emptyLoadResponseMeansMissingSession
+                        && typeof result === "object" && !Array.isArray(result)
+                        && Object.keys(result).length === 0)) {
                         loaded = true;
                         session.sessionId = cursor;
                         session.sessionKey = sessionKey;
